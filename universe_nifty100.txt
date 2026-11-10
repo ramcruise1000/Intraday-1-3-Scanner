@@ -1,4 +1,4 @@
-# NIFTY 100 constituents - auto-updated 2026-11-03 (source: NSE)
+# NIFTY 100 constituents - auto-updated 2026-11-10 (source: NSE)
 # Maintained by the scanner universe auto-refresh (config: universe_refresh).
 # Manual edits are overwritten at the next refresh; set universe_refresh.enabled=false to freeze.
 ABB.NS
