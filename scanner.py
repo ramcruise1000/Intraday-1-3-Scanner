@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- INTRADAY SCANNER v3.2 - ALL THREE SOP STRATEGIES, FULLY AUTOMATED
+ INTRADAY SCANNER v3.2.2 - ALL THREE SOP STRATEGIES, FULLY AUTOMATED
  (AUTO-POI FOR STRATEGY 3) + 15:10 AUTO SQUARE-OFF + SELF-LEARNING JOURNAL
 ===============================================================================
 Companion tool to the "Top 3 Intraday Strategies & Scanners SOP (Rev 2.x)".
@@ -47,6 +47,16 @@ WHAT IT DOES
    after every closed trade and reset from the fresh journal each morning.
 5. ALERTS ONLY. It never places orders. Verify every signal in your broker
    terminal and pass the SOP 12-point checklist before acting.
+
+WHAT IS NEW IN v3.2.2 (vs v3.2.1)
+---------------------------------
+* CRASH FIX: run_once could die with "TypeError: '<' not supported between
+  instances of 'tuple' and 'str'" the moment Strategy 1 put a live A-B-C
+  setup on its watch list. The S1 watch set holds (symbol, side) TUPLES
+  and was unioned into the symbol set that is sorted() for the bar
+  request - a mixed tuple/str sort. The watch list is now projected to
+  plain symbols before the union and the bar request sorts a strings-only
+  set; a dedicated regression test pins this behaviour.
 
 WHAT IS NEW IN v3.2.1 (vs v3.2)
 -------------------------------
@@ -139,7 +149,7 @@ import urllib.request
 from collections import namedtuple
 from datetime import datetime, timedelta, time as dtime, timezone
 
-VERSION = "3.2.1"
+VERSION = "3.2.2"
 
 # ---------------------------------------------------------------------------
 # Time zone: Indian Standard Time is UTC+05:30 year-round (no DST), so a fixed
@@ -2498,6 +2508,32 @@ class Scanner:
     def _open_symbols(self):
         return {o["symbol"] for o in self.journal.state["open"]}
 
+    def _scan_symbols(self, quotes):
+        """Symbols that need fresh 5m bars this cycle: NSE fast-lane
+        candidates + open trades + Strategy 1 watch symbols + a rotating
+        slice of the full universe (so every symbol is bar-checked
+        periodically even in NSE fast-lane mode - S1 pullbacks happen
+        away from the day high, where candidate detection cannot see
+        them).
+
+        v3.2.2: fib.watch holds (symbol, side) TUPLES - it is projected
+        to plain symbols before the union and the result is coerced to
+        strings only, so sorted() can never mix types again (a mixed
+        tuple/str sort crashed live runs the moment an S1 setup went
+        live)."""
+        watch = {s for (s, _side) in self.fib.watch}
+        if quotes:
+            need = (fast_candidates(quotes) | self._open_symbols()
+                    | watch)
+            rs = int(self.cfg.get("rotate_slice", 25) or 0)
+            if rs > 0 and self.universe:
+                seg = (self._cycle * rs) % len(self.universe)
+                need |= set(self.universe[seg:seg + rs])
+            self._cycle += 1
+        else:
+            need = set(self.universe) | self._open_symbols() | watch
+        return {str(s) for s in need}
+
     def _entries_allowed(self, now):
         """SOP 3.4 / Phase V discipline: daily trade cap (10), 2 concurrent
         positions."""
@@ -2545,18 +2581,13 @@ class Scanner:
         # symbols that need bar data: NSE candidates + open trades + S1
         # watch-list + a rotating slice so every symbol is bar-checked
         # periodically even in NSE fast-lane mode (S1 pullbacks happen away
-        # from the day high, where candidate detection cannot see them)
-        if quotes:
-            need = (fast_candidates(quotes) | self._open_symbols()
-                    | self.fib.watch)
-            rs = int(self.cfg.get("rotate_slice", 25) or 0)
-            if rs > 0:
-                seg = (self._cycle * rs) % len(self.universe)
-                need |= set(self.universe[seg:seg + rs])
-            self._cycle += 1
-        else:
-            need = set(self.universe) | self._open_symbols() | self.fib.watch
-        bars = self.bars.get_bars(sorted(need), now=now)
+        # from the day high, where candidate detection cannot see them).
+        # v3.2.2: the need set is built by _scan_symbols() and is ALWAYS
+        # strings-only - fib.watch holds (symbol, side) tuples and a mixed
+        # tuple/str sort here crashed live runs (TypeError: '<' not
+        # supported between instances of 'tuple' and 'str').
+        bars = self.bars.get_bars(sorted(self._scan_symbols(quotes)),
+                                  now=now)
 
         # 1) journal maintenance on fresh bars (outcomes first, always)
         for sym in sorted(bars):
@@ -3677,6 +3708,35 @@ def test_universe_refresh_flow():
         _fetch_nifty100_nse, _fetch_nifty100_wiki = keep
 
 
+def test_scan_symbols_type_safe():
+    """v3.2.2 regression: the S1 watch set holds (symbol, side) tuples;
+    the bar-request symbol set must stay strings-only so sorted() never
+    mixes types (that exact mix crashed live runs on 2026-11-03)."""
+    sc = Scanner.__new__(Scanner)          # bypass __init__ (no network)
+    sc.cfg = _test_cfg(".")
+    sc.universe = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    sc._cycle = 0
+    sc.fib = FibEngine(sc.cfg)
+    sc.fib.watch = {("AAA", "LONG"), ("BBB", "SHORT")}   # tuples!
+    sc.journal = type("J", (), {"state": {"open": [
+        {"symbol": "CCC"}]}})()
+    # 1) Yahoo-only path (no quotes): tuple symbols projected to strings
+    need = sc._scan_symbols({})
+    assert need == {"AAA", "BBB", "CCC", "DDD", "EEE"}, need
+    assert all(isinstance(s, str) for s in need)
+    assert sorted(need) == sorted(["AAA", "BBB", "CCC", "DDD", "EEE"])
+    # 2) NSE fast-lane path: candidates + open + watch + rotate slice
+    quotes = {"AAA": {"ltp": 100.0, "high": 100.0, "low": 99.0},
+              "EEE": {"ltp": 50.0, "high": 51.0, "low": 50.0}}
+    sc._cycle = 0
+    need2 = sc._scan_symbols(quotes)
+    assert all(isinstance(s, str) for s in need2)
+    assert {"AAA", "BBB", "CCC", "EEE"} <= need2
+    sorted(need2)
+    # 3) cycle advanced exactly once for the quotes path
+    assert sc._cycle == 1
+
+
 SELF_TESTS = [test_config_merge, test_journal_autocreate, test_rsi_atr_helpers,
               test_record_and_dedup, test_long_target_win, test_long_stop_loss,
               test_short_mirror, test_same_bar_conservative_loss,
@@ -3689,7 +3749,7 @@ SELF_TESTS = [test_config_merge, test_journal_autocreate, test_rsi_atr_helpers,
               test_learner_gates, test_signal_window_filter,
               test_auto_poi_h4_and_zones, test_auto_poi_fresh_filter_and_expiry,
               test_auto_poi_file_roundtrip_and_idempotence,
-              test_universe_refresh_flow]
+              test_universe_refresh_flow, test_scan_symbols_type_safe]
 
 
 def run_selftests():
