@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- INTRADAY SCANNER v3.2.2 - ALL THREE SOP STRATEGIES, FULLY AUTOMATED
+ INTRADAY SCANNER v3.3 - ALL THREE SOP STRATEGIES, FULLY AUTOMATED
  (AUTO-POI FOR STRATEGY 3) + 15:10 AUTO SQUARE-OFF + SELF-LEARNING JOURNAL
 ===============================================================================
 Companion tool to the "Top 3 Intraday Strategies & Scanners SOP (Rev 2.x)".
@@ -47,6 +47,26 @@ WHAT IT DOES
    after every closed trade and reset from the fresh journal each morning.
 5. ALERTS ONLY. It never places orders. Verify every signal in your broker
    terminal and pass the SOP 12-point checklist before acting.
+
+WHAT IS NEW IN v3.3 (vs v3.2.2)
+-------------------------------
+* NO MORE AUTO-BLOCKING (study mode): the self-learning engine now runs in
+  OBSERVE-ONLY mode by default (self_learning.blocking = false). It still
+  studies the journal and reports which families/directions WOULD be
+  benched, but it never stops a signal any more - while the system is
+  being tested it must keep producing data, not silence.
+* CIRCUIT BREAKER NO LONGER STOPS SIGNALS (journal.breaker_blocking =
+  false): a tripped breaker still sends the SOP warning and still marks
+  the day FAILED in daily_summary.csv, but scanning and alerting continue
+  so the day produces a full, studyable sample.
+* SHADOW SIGNALS AFTER THE DAILY CAP (shadow_after_cap = true): the
+  10-trades/day cap stays exactly as it is - after 10 ALERTED trades the
+  scanner stops alerting, but it KEEPS SCANNING and journals every further
+  confirmed signal as a SHADOW row (Mode=SHADOW in trade_journal.csv).
+  Shadow rows are tracked to their WIN/LOSS outcome like normal trades,
+  are excluded from day stats, verdicts and the circuit breaker, and are
+  reported separately ("SHADOW STUDY") - pure fuel for improving the
+  strategies for the next day.
 
 WHAT IS NEW IN v3.2.2 (vs v3.2.1)
 ---------------------------------
@@ -149,7 +169,7 @@ import urllib.request
 from collections import namedtuple
 from datetime import datetime, timedelta, time as dtime, timezone
 
-VERSION = "3.2.2"
+VERSION = "3.3.0"
 
 # ---------------------------------------------------------------------------
 # Time zone: Indian Standard Time is UTC+05:30 year-round (no DST), so a fixed
@@ -255,10 +275,14 @@ DEFAULT_CONFIG = {
     # ---- SOP 3.4 / Phase V discipline caps ----
     "max_concurrent_positions": 2,    # never hold more than 2 positions
     "max_trades_per_day": 10,         # v3.2: daily trade cap (was 3)
+    "shadow_after_cap": True,         # v3.3: after the cap keep journaling
+                                      # signals as SHADOW rows for study
     # ---- v3.2 self-learning: study the last N closed trades and bench
     # ---- whatever is statistically losing (rules documented in README 6)
     "self_learning": {
         "enabled": True,
+        "blocking": False,            # v3.3: observe-only - report what
+                                      # WOULD be benched, never block
         "lookback_trades": 30,        # study the last 30 closed trades
         "recent_trades": 10,          # "moving trend" tail of that window
         "min_trades_to_gate": 8,      # min sample before a family is benched
@@ -272,6 +296,8 @@ DEFAULT_CONFIG = {
     "telegram": {"bot_token": "", "chat_id": ""},
     "journal": {
         "folder": "journal",
+        "breaker_blocking": False,    # v3.3: tripped breaker warns + marks
+                                      # the day FAILED but keeps signals on
         "daily_loss_limit_R": -2.0,   # circuit breaker: day loss limit (R)
         "daily_loss_limit_amt": 0,    # optional Rs limit (0 = disabled)
         "max_consecutive_losses": 2   # circuit breaker: loss streak
@@ -1730,8 +1756,8 @@ def fast_candidates(quotes):
 # ===========================================================================
 TRADE_COLS = ["TradeID", "Date", "SignalTime", "Symbol", "Direction", "Setup",
               "Entry", "StopLoss", "Target", "Qty", "RiskPerShare", "RiskAmt",
-              "RewardAmt", "RR", "Status", "ExitPrice", "ExitTime", "ExitReason",
-              "Result", "PnL_R", "PnL_Amt", "UpdatedAt", "Notes"]
+              "RewardAmt", "RR", "Mode", "Status", "ExitPrice", "ExitTime",
+              "ExitReason", "Result", "PnL_R", "PnL_Amt", "UpdatedAt", "Notes"]
 
 SUMMARY_COLS = ["Date", "Trades", "Wins", "Losses", "Flats", "Open",
                 "WinRatePct", "NetR", "NetPnlAmt", "BreakerTripped",
@@ -1809,7 +1835,8 @@ class TradeJournal:
                 "signal_time": r["SignalTime"], "symbol": r["Symbol"],
                 "direction": r["Direction"], "entry": r["Entry"],
                 "stop": r["StopLoss"], "target": r["Target"], "qty": r["Qty"],
-                "risk_ps": r["RiskPerShare"]}
+                "risk_ps": r["RiskPerShare"],
+                "shadow": r.get("Mode", "LIVE") == "SHADOW"}
 
     @staticmethod
     def _write_csv(path, cols, rows):
@@ -1829,7 +1856,11 @@ class TradeJournal:
             return [dict(r) for r in csv.DictReader(f)]
 
     def _read_trades(self):
-        return self._read_csv(self.trades_csv)
+        rows = self._read_csv(self.trades_csv)
+        for r in rows:                    # v3.3: pre-Mode / blank rows = LIVE
+            if not r.get("Mode"):
+                r["Mode"] = "LIVE"
+        return rows
 
     def _save_state(self):
         tmp = self.state_json + ".tmp"
@@ -1855,7 +1886,7 @@ class TradeJournal:
             "Target": fmt2(sig.target), "Qty": sig.qty,
             "RiskPerShare": fmt2(sig.risk_ps), "RiskAmt": fmt2(sig.risk_amt),
             "RewardAmt": fmt2(sig.reward_amt),
-            "RR": f"1:{self.cfg.get('rr', 3.0):g}",
+            "RR": f"1:{self.cfg.get('rr', 3.0):g}", "Mode": "LIVE",
             "Status": "OPEN", "ExitPrice": "", "ExitTime": "",
             "ExitReason": "", "Result": "", "PnL_R": "", "PnL_Amt": "",
             "UpdatedAt": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1868,6 +1899,39 @@ class TradeJournal:
         self._save_state()
         print(f"[JOURNAL] OPEN  {sig.trade_id} entry {sig.entry} "
               f"SL {sig.stop} TGT {sig.target} qty {sig.qty}")
+        return sig.trade_id
+
+    def record_shadow(self, sig, reason=""):
+        """v3.3 study mode: journal a confirmed signal that was NOT alerted
+        (daily cap reached / concurrency cap held) as a SHADOW row. Shadow
+        rows are tracked to their outcome like normal trades, but they are
+        excluded from day stats, verdicts and the circuit breaker - they
+        exist purely to study and improve the strategies. Dedup by TradeID.
+        Returns the trade id or None when the signal is already journaled."""
+        if self.has_trade(sig.trade_id):
+            return None
+        row = {
+            "TradeID": sig.trade_id, "Date": sig.date,
+            "SignalTime": sig.sig_time, "Symbol": sig.symbol,
+            "Direction": sig.direction, "Setup": sig.setup,
+            "Entry": fmt2(sig.entry), "StopLoss": fmt2(sig.stop),
+            "Target": fmt2(sig.target), "Qty": sig.qty,
+            "RiskPerShare": fmt2(sig.risk_ps), "RiskAmt": fmt2(sig.risk_amt),
+            "RewardAmt": fmt2(sig.reward_amt),
+            "RR": f"1:{self.cfg.get('rr', 3.0):g}", "Mode": "SHADOW",
+            "Status": "OPEN", "ExitPrice": "", "ExitTime": "",
+            "ExitReason": "", "Result": "", "PnL_R": "", "PnL_Amt": "",
+            "UpdatedAt": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+            "Notes": ("SHADOW study-only (not alerted): " + reason).strip()
+            if reason else "SHADOW study-only (not alerted)",
+        }
+        rows = self._read_trades()
+        rows.append(row)
+        self._write_csv(self.trades_csv, TRADE_COLS, rows)
+        self.state["open"].append(self._row_to_open(row))
+        self._save_state()
+        print(f"[JOURNAL] SHADOW {sig.trade_id} entry {sig.entry} "
+              f"SL {sig.stop} TGT {sig.target} (study-only, no alert)")
         return sig.trade_id
 
     # ---------------- outcome tracking -------------------------------------
@@ -1974,18 +2038,27 @@ class TradeJournal:
                               if o["trade_id"] != t["trade_id"]]
         self._save_state()
         emoji = "✅" if result == "WIN" else ("❌" if result == "LOSS" else "➖")
-        self.notify(f"{emoji} {row['Symbol']} {row['Direction']} -> {reason} "
-                    f"-> {result} {pnl_r:+.2f}R (Rs {pnl_amt:+.2f}) @ {fmt2(exit_price)}")
-        print(f"[JOURNAL] CLOSE {t['trade_id']} {reason} -> {result} "
-              f"{pnl_r:+.2f}R (Rs {pnl_amt:+.2f})")
+        if t.get("shadow"):
+            # v3.3: study-only rows settle silently - no Telegram, console tag
+            print(f"[JOURNAL] SHADOW-CLOSE {t['trade_id']} {reason} -> {result} "
+                  f"{pnl_r:+.2f}R (study-only, not counted in day stats)")
+        else:
+            self.notify(f"{emoji} {row['Symbol']} {row['Direction']} -> {reason} "
+                        f"-> {result} {pnl_r:+.2f}R (Rs {pnl_amt:+.2f}) @ {fmt2(exit_price)}")
+            print(f"[JOURNAL] CLOSE {t['trade_id']} {reason} -> {result} "
+                  f"{pnl_r:+.2f}R (Rs {pnl_amt:+.2f})")
         self.recompute_day(row["Date"])
         return result
 
     # ---------------- day verdict / summary --------------------------------
     def recompute_day(self, date_str, now=None):
-        """Rebuild one day's row in daily_summary.csv and return it."""
+        """Rebuild one day's row in daily_summary.csv and return it.
+        v3.3: SHADOW rows are study-only - they never enter the day's
+        stats, verdict or breaker; the count is noted separately."""
         now = now or now_ist()
-        rows = [r for r in self._read_trades() if r.get("Date") == date_str]
+        all_rows = [r for r in self._read_trades() if r.get("Date") == date_str]
+        rows = [r for r in all_rows if r.get("Mode", "LIVE") != "SHADOW"]
+        shadow_n = len(all_rows) - len(rows)
         if not rows:
             return None
         closed = [r for r in rows if r.get("Status") != "OPEN"]
@@ -2036,6 +2109,8 @@ class TradeJournal:
             notes.append(f"circuit breaker: {worst}-loss streak / day limit {limit_r:g}R")
         if open_n:
             notes.append("live")
+        if shadow_n:
+            notes.append(f"{shadow_n} shadow (study-only)")
         new = {
             "Date": date_str, "Trades": len(rows), "Wins": wins,
             "Losses": losses, "Flats": flats, "Open": open_n,
@@ -2113,11 +2188,17 @@ class TradeJournal:
         L.append("=" * 66)
         opens = self.state["open"]
         if opens:
-            L.append(f"OPEN TRADES ({len(opens)})")
-            for o in opens:
+            live_o = [o for o in opens if not o.get("shadow")]
+            shad_o = [o for o in opens if o.get("shadow")]
+            L.append(f"OPEN TRADES ({len(live_o)} live, {len(shad_o)} shadow)")
+            for o in live_o:
                 L.append(f"  {o['symbol']:<12} {o['direction']:<5} entry "
                          f"{o['entry']} SL {o['stop']} TGT {o['target']} "
                          f"qty {o['qty']}  [{o['date']} {o['signal_time']}]")
+            for o in shad_o:
+                L.append(f"  [SHADOW] {o['symbol']:<6} {o['direction']:<5} entry "
+                         f"{o['entry']} SL {o['stop']} TGT {o['target']} "
+                         f"[{o['date']} {o['signal_time']}]")
         else:
             L.append("OPEN TRADES: none")
         trades = self._read_trades()
@@ -2140,7 +2221,9 @@ class TradeJournal:
                 L.append(f"  {r['Date']:<12}{r['Trades']:>3}{r['Wins']:>3}"
                          f"{r['Losses']:>3}{r['NetR']:>9}{r['NetPnlAmt']:>10}"
                          f"  {r['DayVerdict']}")
-        closed = [r for r in trades if r.get("Status") != "OPEN"]
+        closed = [r for r in trades if r.get("Status") != "OPEN"
+                  and r.get("Mode", "LIVE") != "SHADOW"]
+        shad = [r for r in trades if r.get("Mode", "LIVE") == "SHADOW"]
         if closed:
             wr = 100.0 * sum(1 for r in closed if r["Result"] == "WIN") / len(closed)
             tot = sum(float(r["PnL_R"] or 0) for r in closed)
@@ -2149,6 +2232,16 @@ class TradeJournal:
                      f"{wr:.0f}% | total {tot:+.2f}R | avg {tot/len(closed):+.2f}R/trade")
             L.append(f"(1:3 structure gross breakeven = 25% win rate; SOP net "
                     f"breakeven ~30% incl. costs)")
+        if shad:
+            sh_closed = [r for r in shad if r.get("Status") != "OPEN"]
+            sh_w = sum(1 for r in sh_closed if r.get("Result") == "WIN")
+            sh_l = sum(1 for r in sh_closed if r.get("Result") == "LOSS")
+            sh_r = sum(float(r["PnL_R"] or 0) for r in sh_closed)
+            L.append("")
+            L.append(f"SHADOW STUDY (not counted in day stats): "
+                     f"{len(shad)} journaled | {len(sh_closed)} settled "
+                     f"({sh_w}W/{sh_l}L, {sh_r:+.2f}R) | "
+                     f"{len(shad) - len(sh_closed)} still open")
         L.append("")
         L.append(f"files: {self.trades_csv}")
         L.append(f"       {self.summary_csv}")
@@ -2216,6 +2309,11 @@ class SelfLearner:
         self.notify = notify if notify is not None else (lambda m: None)
         sl = cfg.get("self_learning") or {}
         self.enabled = bool(sl.get("enabled", True))
+        # v3.3: observe-only by default - the gates are still computed and
+        # reported ("would-bench") but never enforced, so the system keeps
+        # producing signals/data while it is being tested. Set
+        # self_learning.blocking=true in config.json to restore v3.2 gating.
+        self.blocking = bool(sl.get("blocking", False))
         self.lookback = int(sl.get("lookback_trades", 30) or 30)
         self.recent_n = int(sl.get("recent_trades", 10) or 10)
         self.min_setup_n = int(sl.get("min_trades_to_gate", 8) or 8)
@@ -2276,7 +2374,8 @@ class SelfLearner:
         if not self.enabled:
             return self.stats
         closed = [r for r in self.journal._read_trades()
-                  if r.get("Status") != "OPEN" and r.get("Result")]
+                  if r.get("Status") != "OPEN" and r.get("Result")
+                  and r.get("Mode", "LIVE") != "SHADOW"]
         closed.sort(key=lambda r: (r.get("Date", ""), r.get("ExitTime", "")))
         studied = closed[-self.lookback:]
         if not studied:
@@ -2363,8 +2462,11 @@ class SelfLearner:
 
     # ---------------- gating -------------------------------------------------
     def allow(self, sig):
-        """(ok, reason): is this signal allowed under the learned gates?"""
-        if not self.enabled:
+        """(ok, reason): is this signal allowed under the learned gates?
+        v3.3: in observe-only mode (self_learning.blocking=false, the
+        default) every signal passes - the gates are reported, not
+        enforced."""
+        if not self.enabled or not self.blocking:
             return True, ""
         fam = _fam_of(sig.setup)
         why = self.gates["blocked_setups"].get(fam)
@@ -2379,16 +2481,19 @@ class SelfLearner:
     def status_line(self):
         if not self.enabled:
             return "[LEARN] self-learning disabled (config: self_learning)"
+        mode = ("BLOCKING" if self.blocking else "OBSERVE-ONLY (no benching)")
         o = self.stats.get("overall")
         if not o:
-            return ("[LEARN] no closed trades to learn from yet - "
-                    "all gates open")
+            return (f"[LEARN] mode: {mode} | no closed trades to learn "
+                    f"from yet - all gates open")
+        tag = "benched" if self.blocking else "would-bench"
         benched = ", ".join(sorted(self.gates["blocked_setups"])) or "none"
         dirs = ", ".join(sorted(self.gates["blocked_directions"])) or "none"
         pref = self.gates.get("preferred") or "-"
-        return (f"[LEARN] last {o['n']} closed: {o['wins']}W/{o['losses']}L "
-                f"({o['wr']:.0f}% WR, {o['r']:+.1f}R) | benched: {benched} | "
-                f"benched directions: {dirs} | top performer: {pref}")
+        return (f"[LEARN] mode: {mode} | last {o['n']} closed: "
+                f"{o['wins']}W/{o['losses']}L ({o['wr']:.0f}% WR, {o['r']:+.1f}R) | "
+                f"{tag}: {benched} | {tag} directions: {dirs} | "
+                f"top performer: {pref}")
 
     def report_text(self):
         if not self.enabled:
@@ -2409,8 +2514,9 @@ class SelfLearner:
         for fam, b in self.stats.get("setups", {}).items():
             if fam not in ("S1", "S2", "S3"):
                 continue
-            tag = "  [BENCHED - no signals]" \
-                if fam in self.gates["blocked_setups"] else ""
+            bench_tag = "BENCHED - no signals" if self.blocking \
+                else "WOULD-BENCH - blocking off"
+            tag = f"  [{bench_tag}]" if fam in self.gates["blocked_setups"] else ""
             star = "  <- top performer" \
                 if fam == self.gates.get("preferred") else ""
             L.append(f"  {fam}: {b['wins']}W/{b['losses']}L | "
@@ -2419,8 +2525,7 @@ class SelfLearner:
         for d, b in self.stats.get("directions", {}).items():
             if d not in ("LONG", "SHORT"):
                 continue
-            tag = "  [BENCHED - no signals]" \
-                if d in self.gates["blocked_directions"] else ""
+            tag = f"  [{bench_tag}]" if d in self.gates["blocked_directions"] else ""
             L.append(f"  {d}: {b['wins']}W/{b['losses']}L | "
                      f"{b['wr']:.0f}% WR | {b['r']:+.2f}R over "
                      f"{b['n']}{tag}")
@@ -2429,10 +2534,29 @@ class SelfLearner:
                  for h, b in hrs.items() if b["n"]]
         if parts:
             L.append("  by entry hour: " + " | ".join(parts))
+        verb = "benched" if self.blocking else "would-bench"
         for fam, why in self.gates["blocked_setups"].items():
-            L.append(f"  gate: {fam} benched - {why}")
+            L.append(f"  gate: {fam} {verb} - {why}")
         for d, why in self.gates["blocked_directions"].items():
-            L.append(f"  gate: {d} benched - {why}")
+            L.append(f"  gate: {d} {verb} - {why}")
+        if not self.blocking:
+            L.append("  (observe-only mode: self_learning.blocking=false - "
+                     "no signal is being stopped)")
+        # v3.3: shadow study section - the would-have-been signals that
+        # were journaled after the daily cap
+        try:
+            shad = [r for r in self.journal._read_trades()
+                    if r.get("Mode", "LIVE") == "SHADOW"]
+        except Exception:
+            shad = []
+        if shad:
+            sh_closed = [r for r in shad if r.get("Status") != "OPEN"]
+            sh_w = sum(1 for r in sh_closed if r.get("Result") == "WIN")
+            sh_l = sum(1 for r in sh_closed if r.get("Result") == "LOSS")
+            sh_r = sum(float(r.get("PnL_R") or 0) for r in sh_closed)
+            L.append(f"  shadow study: {len(shad)} journaled, "
+                     f"{len(sh_closed)} settled ({sh_w}W/{sh_l}L, "
+                     f"{sh_r:+.2f}R), {len(shad) - len(sh_closed)} open")
         return "\n".join(L)
 
     def digest(self, now=None):
@@ -2536,11 +2660,13 @@ class Scanner:
 
     def _entries_allowed(self, now):
         """SOP 3.4 / Phase V discipline: daily trade cap (10), 2 concurrent
-        positions."""
+        positions. v3.3: SHADOW rows are study-only and never count."""
         today = now.date().isoformat()
         day_n = sum(1 for r in self.journal._read_trades()
-                    if r.get("Date") == today)
-        open_n = len(self.journal.state["open"])
+                    if r.get("Date") == today
+                    and r.get("Mode", "LIVE") != "SHADOW")
+        open_n = sum(1 for o in self.journal.state["open"]
+                     if not o.get("shadow"))
         if day_n >= int(self.cfg.get("max_trades_per_day", 10)):
             return False, f"daily entry cap reached ({day_n} trades today)"
         if open_n >= int(self.cfg.get("max_concurrent_positions", 2)):
@@ -2549,19 +2675,30 @@ class Scanner:
 
     def _cap_notice(self, now):
         """v3.2: one-time Telegram/console notice when the daily trade cap
-        is hit. Open trades keep being monitored to their outcome."""
+        is hit. Open trades keep being monitored to their outcome.
+        v3.3: with shadow_after_cap on, further signals keep being journaled
+        as SHADOW rows (no alerts) so the day still produces study data."""
         today = now.date().isoformat()
         cap = int(self.cfg.get("max_trades_per_day", 10))
         day_n = sum(1 for r in self.journal._read_trades()
-                    if r.get("Date") == today)
+                    if r.get("Date") == today
+                    and r.get("Mode", "LIVE") != "SHADOW")
         if day_n < cap or self.journal.state.get("cap_notified", {}).get(today):
             return
         self.journal.state.setdefault("cap_notified", {})[today] = True
         self.journal._save_state()
-        msg = (f"\U0001f6d1 DAILY CAP {today}: {day_n}/{cap} trades taken - "
-               f"no more signals today. Open trades keep being monitored "
-               f"and square off at {self.cfg.get('squareoff', '15:10')} IST "
-               f"as usual.")
+        if self.cfg.get("shadow_after_cap", True):
+            msg = (f"\U0001f6d1 DAILY CAP {today}: {day_n}/{cap} trades taken - "
+                   f"no more ALERTS today. The scanner keeps scanning and "
+                   f"journals further signals as SHADOW rows for study "
+                   f"(not alerted, not counted). Open trades are monitored "
+                   f"and squared off at {self.cfg.get('squareoff', '15:10')} "
+                   f"IST as usual.")
+        else:
+            msg = (f"\U0001f6d1 DAILY CAP {today}: {day_n}/{cap} trades taken - "
+                   f"no more signals today. Open trades keep being monitored "
+                   f"and square off at {self.cfg.get('squareoff', '15:10')} IST "
+                   f"as usual.")
         print("\n" + msg + "\n")
         send_telegram(msg)
 
@@ -2597,29 +2734,36 @@ class Scanner:
                 if sym in self._open_symbols():
                     self.journal.on_quote(sym, q, now=now)
 
-        # 2) fresh signals (suppressed after the daily circuit breaker;
-        #    gates re-learned from the journal every cycle - v3.2)
+        # 2) fresh signals. v3.3: NOTHING stops generation any more while
+        #    testing - the learner is observe-only by default and a tripped
+        #    circuit breaker only warns (both restore-able via config), so
+        #    every day produces a full studyable sample. The 10/day cap is
+        #    enforced at ALERT time; once it is hit, further confirmed
+        #    signals are journaled as SHADOW rows (no alert) for study.
         self.learner.refresh(now=now)
         fresh = []
-        if self.journal.breaker_tripped_today(now=now):
+        tripped = self.journal.breaker_tripped_today(now=now)
+        breaker_blocks = tripped and bool(
+            (self.cfg.get("journal") or {}).get("breaker_blocking", False))
+        if tripped and not breaker_blocks:
+            print("[SOP] circuit breaker tripped today - observe mode: "
+                  "signals keep flowing for study "
+                  "(journal.breaker_blocking=false)")
+        if breaker_blocks:
             print("[SOP] CIRCUIT BREAKER active for today - "
                   "no new entries, open trades still monitored")
         else:
             # Strategy 3 first (own data flow: POI zones, 15m/60m, bias)
             fresh += self._scan_s3(now)
-            ok, why = self._entries_allowed(now)
-            if ok:
-                for sym in sorted(bars):
-                    b = bars[sym]
-                    sig = None
-                    if self.cfg.get("s1_enabled", True):
-                        sig = self.fib.update(sym, b)      # Strategy 1
-                    if sig is None:
-                        sig = check_s2(sym, b, self.cfg)   # Strategy 2
-                    if sig:
-                        fresh.append(sig)
-            else:
-                print(f"[SOP] {why} - no new entries")
+            for sym in sorted(bars):
+                b = bars[sym]
+                sig = None
+                if self.cfg.get("s1_enabled", True):
+                    sig = self.fib.update(sym, b)      # Strategy 1
+                if sig is None:
+                    sig = check_s2(sym, b, self.cfg)   # Strategy 2
+                if sig:
+                    fresh.append(sig)
 
         # v3.2 engine-wide entry window: no signals before scan_start or
         # after entry_cutoff (13:30) for ANY strategy (S2 self-gates; this
@@ -2635,16 +2779,20 @@ class Scanner:
         for sig in fresh:
             if sig.symbol in self._open_symbols():
                 continue        # SOP 3.4: one position per instrument
-            ok, _ = self._entries_allowed(now)
-            if not ok:
-                break
-            ok, why = self.learner.allow(sig)   # v3.2 self-learning gates
-            if not ok:
-                print(f"[LEARN] signal suppressed - {why}")
-                continue
-            tid = self.journal.record_signal(sig)
-            if tid:
-                self._alert(sig)
+            ok, why = self._entries_allowed(now)
+            if ok:
+                ok2, why2 = self.learner.allow(sig)   # v3.2 self-learning
+                if not ok2:
+                    print(f"[LEARN] signal suppressed - {why2}")
+                    continue
+                tid = self.journal.record_signal(sig)
+                if tid:
+                    self._alert(sig)
+            elif self.cfg.get("shadow_after_cap", True):
+                # v3.3 study mode: cap/concurrency reached - journal the
+                # signal silently as SHADOW (no alert), still tracked to
+                # its outcome for next-day strategy improvement
+                self.journal.record_shadow(sig, reason=why)
 
         # 3) status line
         self._status_line(now)
@@ -2715,9 +2863,12 @@ class Scanner:
         send_telegram(msg)
 
     def _status_line(self, now):
-        rows = [r for r in self.journal._read_trades()
-                if r.get("Date") == now.date().isoformat()]
-        open_n = len(self.journal.state["open"])
+        all_rows = [r for r in self.journal._read_trades()
+                    if r.get("Date") == now.date().isoformat()]
+        rows = [r for r in all_rows if r.get("Mode", "LIVE") != "SHADOW"]
+        shad_n = len(all_rows) - len(rows)      # v3.3: study-only rows
+        open_n = sum(1 for o in self.journal.state["open"]
+                     if not o.get("shadow"))
         closed = [r for r in rows if r.get("Status") != "OPEN"]
         net = sum(float(r["PnL_R"] or 0) for r in closed)
         wins = sum(1 for r in closed if r["Result"] == "WIN")
@@ -2726,7 +2877,8 @@ class Scanner:
         s = self.journal.recompute_day(now.date().isoformat(), now=now)
         if s:
             verdict = s.get("DayVerdict", "PENDING")
-        print(f"[{now.strftime('%H:%M')}] signals today: {len(rows)} "
+        shad_txt = f" (+{shad_n} shadow)" if shad_n else ""
+        print(f"[{now.strftime('%H:%M')}] signals today: {len(rows)}{shad_txt} "
               f"({wins}W/{losses}L, {open_n} open) | day: {net:+.2f}R "
               f"| verdict: {verdict}")
 
@@ -2746,6 +2898,13 @@ class Scanner:
               f"{self.cfg.get('max_concurrent_positions', 2)} concurrent | "
               f"entries {self.cfg['scan_start']}-"
               f"{self.cfg['entry_cutoff']} IST")
+        if self.cfg.get("shadow_after_cap", True):
+            print("[SCANNER] v3.3 study mode: after the daily cap, further "
+                  "signals are journaled as SHADOW rows (no alerts)")
+        print("[SCANNER] learner " +
+              ("BLOCKING signals (self_learning.blocking=true)"
+               if getattr(self.learner, "blocking", False)
+               else "OBSERVE-ONLY - never blocks signals (v3.3)"))
         try:
             print(self.learner.status_line())
         except Exception:
@@ -2779,12 +2938,19 @@ class Scanner:
                     .get(today)):
                 self.journal.state["squareoff_alert_sent"][today] = True
                 self.journal._save_state()
-                n_open = len(self.journal.state["open"])
+                live_o = [o for o in self.journal.state["open"]
+                          if not o.get("shadow")]
+                n_open = len(live_o)
+                shad_n = len(self.journal.state["open"]) - n_open
+                extra = (f" {shad_n} study-only SHADOW row(s) square off in "
+                         f"the journal automatically (no action needed)."
+                         if shad_n else "")
                 send_telegram(
                     f"⏰ {today} {alert_time.strftime('%H:%M')} IST - "
                     f"SQUARE-OFF DIRECTIVE: close all {n_open} open MIS "
                     f"position(s) NOW. Auto square-off at "
-                    f"{sq_time.strftime('%H:%M')}; no new entries from here.")
+                    f"{sq_time.strftime('%H:%M')}; no new entries from "
+                    f"here." + extra)
                 print("[SOP] square-off directive sent")
             self.run_once(now=now)
             target = now.replace(second=0, microsecond=0)
@@ -3417,7 +3583,12 @@ def test_learner_gates():
     assert lr.gates["blocked_directions"].get("SHORT"), \
         "SHORT (0% WR over 10) benched"
     assert lr.gates["preferred"] == "S2"
-    # gating behaviour
+    # v3.3 DEFAULT = observe-only: gates are computed + reported, never enforced
+    ok, _ = lr.allow(_lr_sig("S3_CHOCH", "SHORT"))
+    assert ok, "observe-only mode (blocking=false) must pass every signal"
+    assert "OBSERVE-ONLY" in lr.status_line()
+    # restore v3.2 blocking to pin the gate behaviour itself
+    lr.blocking = True
     ok, _ = lr.allow(_lr_sig("S2_BREAKOUT", "LONG"))
     assert ok, "healthy family + open direction must pass"
     ok, why = lr.allow(_lr_sig("S3_CHOCH", "SHORT"))
@@ -3444,6 +3615,106 @@ def test_learner_gates():
     lr3 = SelfLearner(j, cfg_off, notify=None)
     ok, _ = lr3.allow(_lr_sig("S3_CHOCH", "SHORT"))
     assert ok
+
+
+def test_learner_ignores_shadow_rows():
+    """v3.3: SHADOW rows are study-only - the learner studies LIVE rows."""
+    import tempfile
+    d = tempfile.mkdtemp()
+    cfg = _test_cfg(d)
+    j = TradeJournal(base_dir=d, cfg=cfg, notify=None)
+    rows = [_closed_row(f"L-{i}", "2026-01-05", "09:45", "S2_BREAKOUT",
+                        "LONG", "LOSS", -1.0, exit_time=f"10:{i:02d}")
+            for i in range(10)]
+    j._write_csv(j.trades_csv, TRADE_COLS, rows)
+    lr = SelfLearner(j, cfg, notify=None)
+    lr.refresh(now=datetime(2026, 1, 6, 9, 0, tzinfo=IST))
+    assert lr.stats["overall"]["n"] == 10
+    # 10 losing S3 SHADOW rows must not enter the study set
+    shad = [dict(_closed_row(f"SH-{i}", "2026-01-05", "13:00", "S3_CHOCH",
+                             "SHORT", "LOSS", -1.0, exit_time=f"13:{i:02d}"),
+                 Mode="SHADOW") for i in range(10)]
+    j._write_csv(j.trades_csv, TRADE_COLS, rows + shad)
+    lr.refresh(now=datetime(2026, 1, 6, 9, 5, tzinfo=IST))
+    assert lr.stats["overall"]["n"] == 10, "shadow rows must not be studied"
+    assert "S3" not in lr.stats.get("setups", {})
+
+
+def test_shadow_flow_after_cap():
+    """v3.3: once the daily cap is reached, further signals journal as
+    SHADOW rows - tracked to their outcome, but silent (no Telegram) and
+    excluded from day stats, the breaker and the cap itself."""
+    import tempfile
+    d = tempfile.mkdtemp()
+    cfg = _test_cfg(d, max_trades_per_day=10)
+    j = TradeJournal(base_dir=d, cfg=cfg, notify=None)
+    day = "2026-01-05"
+    rows = [_closed_row(f"T-{i}", day, "09:45", "S2_BREAKOUT", "LONG",
+                        "LOSS", -1.0, exit_time=f"10:{i:02d}")
+            for i in range(10)]
+    j._write_csv(j.trades_csv, TRADE_COLS, rows)
+    j._rebuild_state_from_csv()
+    sc = Scanner.__new__(Scanner)
+    sc.cfg = cfg
+    sc.journal = j
+    now = datetime(2026, 1, 5, 12, 0, tzinfo=IST)
+    ok, why = sc._entries_allowed(now)
+    assert not ok and "cap" in why, "10 live trades -> cap reached"
+    sent = []
+    j.notify = sent.append
+    sig = Signal("TST", "LONG", day, "12:05", 100.0, 99.0, 103.0,
+                 10, 1.0, 10.0, 30.0, note="", setup="S1_FIB_T01")
+    tid = j.record_shadow(sig, reason=why)
+    assert tid and not sent, "shadow recording must be silent"
+    assert j.record_shadow(sig, reason="again") is None, "dedup by TradeID"
+    sh = [r for r in j._read_trades() if r.get("Mode") == "SHADOW"]
+    assert len(sh) == 1 and sh[0]["Status"] == "OPEN"
+    ok, why = sc._entries_allowed(now)
+    assert not ok and "cap" in why, "shadow must not raise the live count"
+    # settle the shadow via bars: rally past its 103 target after 12:05
+    bars = _mk_bars_step(day, _trend_spec(15, start_o=101.0, step=0.30),
+                         start="12:10")
+    j.on_bars("TST", bars, now=datetime(2026, 1, 5, 13, 0, tzinfo=IST))
+    sh = [r for r in j._read_trades() if r.get("Mode") == "SHADOW"]
+    assert sh[0]["Status"] == "CLOSED" and sh[0]["Result"] == "WIN"
+    assert not sent, "shadow settle must be console-only (no Telegram)"
+    # day summary: LIVE stats only - the +3R shadow win is NOT counted
+    s = j.recompute_day(day, now=now)
+    assert s["Trades"] == 10 and s["Wins"] == 0
+    assert abs(float(s["NetR"]) + 10.0) < 1e-6, "shadow PnL excluded from NetR"
+    assert "1 shadow" in s["Notes"]
+    assert s["BreakerTripped"] == "YES"    # from the 10 live losses
+    assert s["DayVerdict"].startswith("FAILED")
+
+
+def test_breaker_observe_mode():
+    """v3.3: a tripped circuit breaker stops signals ONLY when
+    journal.breaker_blocking=true; the default observe mode keeps the
+    day producing studyable data (verdict still marked FAILED)."""
+    import tempfile
+    d = tempfile.mkdtemp()
+    cfg = _test_cfg(d)
+    j = TradeJournal(base_dir=d, cfg=cfg, notify=None)
+    day = "2026-01-05"
+    rows = [_closed_row(f"T-{i}", day, "09:45", "S2_BREAKOUT", "LONG",
+                        "LOSS", -1.0, exit_time=f"10:{i:02d}")
+            for i in range(2)]
+    j._write_csv(j.trades_csv, TRADE_COLS, rows)
+    now = datetime(2026, 1, 5, 11, 0, tzinfo=IST)
+    j.recompute_day(day, now=now)
+    tripped = j.breaker_tripped_today(now=now)
+    assert tripped, "2 consecutive losses trip the streak breaker"
+    # observe mode (default): generation continues
+    blocks = tripped and bool(
+        (cfg.get("journal") or {}).get("breaker_blocking", False))
+    assert not blocks
+    s = j.recompute_day(day, now=now)
+    assert s["DayVerdict"].startswith("FAILED"), "observe mode still marks the day"
+    # blocking restored via config
+    cfg["journal"]["breaker_blocking"] = True
+    blocks = tripped and bool(
+        (cfg.get("journal") or {}).get("breaker_blocking", False))
+    assert blocks
 
 
 def test_signal_window_filter():
@@ -3749,7 +4020,9 @@ SELF_TESTS = [test_config_merge, test_journal_autocreate, test_rsi_atr_helpers,
               test_learner_gates, test_signal_window_filter,
               test_auto_poi_h4_and_zones, test_auto_poi_fresh_filter_and_expiry,
               test_auto_poi_file_roundtrip_and_idempotence,
-              test_universe_refresh_flow, test_scan_symbols_type_safe]
+              test_universe_refresh_flow, test_scan_symbols_type_safe,
+              test_learner_ignores_shadow_rows, test_shadow_flow_after_cap,
+              test_breaker_observe_mode]
 
 
 def run_selftests():
