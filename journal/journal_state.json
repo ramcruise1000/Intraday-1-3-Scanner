@@ -1,21 +1,9 @@
 {
- "open": [
-  {
-   "trade_id": "20261111-SHRIRAMFIN-LONG",
-   "date": "2026-11-11",
-   "signal_time": "11:05",
-   "symbol": "SHRIRAMFIN",
-   "direction": "LONG",
-   "entry": "983.85",
-   "stop": "980.10",
-   "target": "995.10",
-   "qty": 16,
-   "risk_ps": "3.75"
-  }
- ],
+ "open": [],
  "day_verdict_sent": {
   "2026-11-02": true,
-  "2026-11-04": true
+  "2026-11-04": true,
+  "2026-11-11": true
  },
  "breaker_notified": {},
  "squareoff_alert_sent": {}
