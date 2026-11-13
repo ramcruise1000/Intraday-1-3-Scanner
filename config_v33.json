@@ -1,0 +1,12 @@
+{
+  "capital": 25000,
+  "risk_pct": 0.25,
+  "rr": 3.0,
+  "scan_start": "09:30",
+  "scan_end": "14:30",
+  "min_confluence_score": 7,
+  "lookback_days": 10,
+  "max_trades_per_day": 5,
+  "telegram_token": "",
+  "telegram_chat": ""
+}
