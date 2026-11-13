@@ -1,0 +1,53 @@
+name: Scanner V33 - Extended Session
+
+on:
+  schedule:
+    - cron: '*/5 4-9 * * *'
+    - cron: '45 9 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: 'once'
+        type: choice
+        options:
+          - once
+          - loop
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests
+
+      - name: Run Scanner V33
+        env:
+          SCANNER_V33_CAPITAL: ${{ secrets.SCANNER_V33_CAPITAL }}
+          SCANNER_V33_RISK: ${{ secrets.SCANNER_V33_RISK }}
+          TELEGRAM_BOT_TOKEN_V33: ${{ secrets.TELEGRAM_BOT_TOKEN_V33 }}
+          TELEGRAM_CHAT_ID_V33: ${{ secrets.TELEGRAM_CHAT_ID_V33 }}
+        run: |
+          if [ "${{ github.event.inputs.mode }}" == "loop" ]; then
+            python scanner_v33.py --loop
+          else
+            python scanner_v33.py --once
+          fi
+
+      - name: Commit Journal V33
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add journal_v33/ scanner_v33.log
+          git diff --staged --quiet || git commit -m "V33 Journal Update: $(date -u)"
+          git push
