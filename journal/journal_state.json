@@ -1,5 +1,19 @@
 {
- "open": [],
+ "open": [
+  {
+   "trade_id": "20261113-ADANIGREEN-SHORT",
+   "date": "2026-11-13",
+   "signal_time": "11:55",
+   "symbol": "ADANIGREEN",
+   "direction": "SHORT",
+   "entry": "1412.95",
+   "stop": "1421.15",
+   "target": "1388.35",
+   "qty": 7,
+   "risk_ps": "8.20",
+   "shadow": false
+  }
+ ],
  "day_verdict_sent": {
   "2026-11-02": true,
   "2026-11-04": true,
