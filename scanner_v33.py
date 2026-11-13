@@ -197,16 +197,30 @@ class AdaptiveScannerV33:
     def _send_telegram_alert(self, signal, trade_id):
         try:
             import requests
-            message = f"🎯 V33 Signal (Quality: {signal['confluence_score']}/10)
-Symbol: {signal['symbol']}
-Direction: {signal['direction']}
-Entry: ₹{signal['entry']}
-SL: ₹{signal['sl']}
-Target: ₹{signal['target']} (1:3 RR)
-Qty: {signal['qty']}
-ID: {trade_id}"
+            # Build message without emojis to avoid encoding issues
+            message = "V33 SIGNAL ALERT\n"
+            message += "==================\n"
+            message += f"Quality Score: {signal['confluence_score']}/10\n"
+            message += f"Symbol: {signal['symbol']}\n"
+            message += f"Direction: {signal['direction']}\n"
+            message += f"Entry: Rs.{signal['entry']}\n"
+            message += f"Stop Loss: Rs.{signal['sl']}\n"
+            message += f"Target: Rs.{signal['target']} (1:3 RR)\n"
+            message += f"Quantity: {signal['qty']}\n"
+            message += f"Trade ID: {trade_id}\n"
+            message += "=================="
+
             url = f"https://api.telegram.org/bot{self.config['telegram_token']}/sendMessage"
-            requests.post(url, json={'chat_id': self.config['telegram_chat'], 'text': message})
+            payload = {
+                'chat_id': self.config['telegram_chat'],
+                'text': message,
+                'parse_mode': 'HTML'
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"Telegram alert sent for {signal['symbol']}")
+            else:
+                logger.error(f"Telegram API error: {response.status_code}")
         except Exception as e:
             logger.error(f"Telegram error: {e}")
 
