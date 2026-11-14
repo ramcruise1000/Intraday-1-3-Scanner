@@ -210,3 +210,6 @@
 2026-11-14 11:10:48,014 [ERROR] Error processing WIPRO.NS: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
 2026-11-14 11:10:48,299 [ERROR] Error processing ZYDUSLIFE.NS: The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().
 2026-11-14 11:10:48,299 [INFO] Cycle complete. Signals: 0
+2026-11-14 16:09:25,424 [INFO] Scanner v3.3.0 - Extended Session Mode
+2026-11-14 16:09:25,424 [INFO] Session: 09:30 - 14:30 IST
+2026-11-14 16:09:25,424 [INFO] Outside session window (16:09)
