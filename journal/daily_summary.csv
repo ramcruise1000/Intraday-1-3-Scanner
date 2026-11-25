@@ -4,3 +4,4 @@ Date,Trades,Wins,Losses,Flats,Open,WinRatePct,NetR,NetPnlAmt,BreakerTripped,DayV
 2026-11-11,1,0,1,0,0,0.0,-1.000,-60.00,NO,FAILED,
 2026-11-12,1,0,1,0,0,0.0,-1.000,-62.00,NO,FAILED,
 2026-11-13,1,1,0,0,0,100.0,+1.213,69.65,NO,SUCCESS,
+2026-11-25,2,1,1,0,0,50.0,-0.192,-26.60,NO,FAILED,1 shadow (study-only)
