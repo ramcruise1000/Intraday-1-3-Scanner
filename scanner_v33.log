@@ -1915,3 +1915,6 @@
 2026-11-26 19:18:35,808 [INFO] Scanner v3.3.0 - Extended Session Mode
 2026-11-26 19:18:35,809 [INFO] Session: 09:30 - 14:30 IST
 2026-11-26 19:18:35,809 [INFO] Outside session window (19:18)
+2026-11-27 05:03:58,771 [INFO] Scanner v3.3.0 - Extended Session Mode
+2026-11-27 05:03:58,771 [INFO] Session: 09:30 - 14:30 IST
+2026-11-27 05:03:58,772 [INFO] Outside session window (05:03)
